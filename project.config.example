@@ -1,0 +1,5 @@
+# project.config — put at the repo root. One env var per line, `#` comments.
+NODE_ENV                # shows NODE_ENV=<value>
+stage=APP_STAGE         # shows stage=<value of APP_STAGE>
+DATABASE_URL:set        # shows only ✓ / ✗, never the value
+KUBECONFIG

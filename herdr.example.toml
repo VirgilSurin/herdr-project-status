@@ -1,0 +1,10 @@
+# Sidebar rows for ~/.config/herdr/config.toml (then: herdr server reload-config).
+# Keep your existing first rows; the last two are the project-status tokens.
+# Only one of $aws / $aws_prod is ever set, so they share a row.
+[ui.sidebar.spaces]
+rows = [
+  ["state_icon", "workspace"],
+  ["branch", "git_status"],
+  [{ token = "$aws", fg = "#f9e2af" }, { token = "$aws_prod", fg = "#f38ba8", bold = true }],
+  [{ token = "$env", dim = true }],
+]

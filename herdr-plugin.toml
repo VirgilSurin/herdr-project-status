@@ -1,0 +1,63 @@
+id = "project-status"
+name = "Project Status"
+version = "0.1.0"
+min_herdr_version = "0.7.5"
+description = "Show the active AWS profile (with session time left) and per-project env vars from a project.config file in the herdr sidebar."
+platforms = ["linux", "macos"]
+
+# The status itself comes from the shell hook (shell/hook.zsh): env vars only
+# exist inside each shell, so the shell reports them as workspace metadata on
+# every prompt and leaves a per-pane state file behind. The events below keep
+# the sidebar pointing at the pane you are actually looking at: every one runs
+# the same idempotent reconcile, which re-reports each workspace from its
+# focused pane's state file and drops state for panes that no longer exist.
+
+# Once per server start / live handoff: metadata does not survive a restart,
+# but the state files do.
+[[startup]]
+command = ["bash", "project-status.sh", "reconcile"]
+
+[[events]]
+on = "pane.focused"
+command = ["bash", "project-status.sh", "reconcile"]
+
+[[events]]
+on = "tab.focused"
+command = ["bash", "project-status.sh", "reconcile"]
+
+[[events]]
+on = "pane.closed"
+command = ["bash", "project-status.sh", "reconcile"]
+
+[[events]]
+on = "pane.exited"
+command = ["bash", "project-status.sh", "reconcile"]
+
+# Full, untruncated values for the focused pane.
+[[actions]]
+id = "show"
+title = "Project Status: details"
+contexts = ["global"]
+command = ["bash", "project-status.sh", "show"]
+
+# Checks the install (hook sourced, sidebar rows, starship) and prints any
+# missing snippet.
+[[actions]]
+id = "doctor"
+title = "Project Status: doctor"
+contexts = ["global"]
+command = ["bash", "project-status.sh", "doctor"]
+
+[[panes]]
+id = "details"
+title = "Project Status"
+placement = "overlay"
+platforms = ["linux", "macos"]
+command = ["bash", "project-status.sh", "details-ui"]
+
+[[panes]]
+id = "doctor"
+title = "Project Status: doctor"
+placement = "overlay"
+platforms = ["linux", "macos"]
+command = ["bash", "project-status.sh", "doctor-ui"]

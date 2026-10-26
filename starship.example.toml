@@ -1,0 +1,19 @@
+# Prompt segments for ~/.config/starship.toml. The hook exports these on every
+# prompt. Inside herdr only PROJECT_STATUS_AWS_PROD is set (the sidebar shows
+# the rest) unless PS_PROMPT_IN_HERDR=1.
+
+[env_var.PROJECT_STATUS_AWS_PROD]
+format = "[ ⚠ PROD: $env_value ⚠ ]($style) "
+style = "bold white bg:#3d0000"
+
+[env_var.PROJECT_STATUS_AWS]
+format = "[ $env_value]($style) "
+style = "yellow"
+
+[env_var.PROJECT_STATUS_ENV]
+format = "[$env_value]($style) "
+style = "dimmed"
+
+# The built-in aws module shows the profile too; disable it to avoid duplicates.
+[aws]
+disabled = true
