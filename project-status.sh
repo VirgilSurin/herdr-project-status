@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
 # herdr-project-status: plugin-side entry point.
 #
+#   project-status.sh bar [<pane>]   action: toggle the project bar in this tab
 #   project-status.sh reconcile      startup + focus/close events
 #   project-status.sh show | doctor  actions: open the details / doctor overlay
 #   project-status.sh details-ui     the details overlay pane
 #   project-status.sh doctor-ui      the doctor overlay pane
 #
-# The shell hook (shell/hook.zsh) does the real work on every prompt: it
-# reports the status of its own shell as workspace metadata and writes a
-# per-pane state file. Panes of one workspace share the metadata, so the last
-# prompt wins; reconcile fixes that up on focus by re-reporting each workspace
-# from the state file of the pane you are looking at. It is idempotent and
-# only calls herdr when the sidebar would actually change.
+# The shell hook (shell/hook.zsh) does the real work on every prompt: it writes
+# a per-pane state file with its shell's status, which the project bar
+# (bar.zsh) renders for whichever pane is focused. With PS_SIDEBAR=prod|all
+# the hook also reports herdr sidebar tokens; panes of one workspace share
+# those, so the last prompt wins, and reconcile fixes that up on focus by
+# re-reporting each workspace from the pane you are looking at. Reconcile also
+# drops state left by closed panes. It is idempotent and only calls herdr when
+# the sidebar would actually change.
 #
 # Targets bash 3.2 (macOS /bin/bash): no associative arrays. Needs jq.
 
@@ -23,12 +26,14 @@ STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/herdr-project-status"
 USER_CONFIG="${PS_USER_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr-project-status/config.zsh}"
 SEP=$'\x1f'   # field separator for jq output; not whitespace, so empty fields survive `read`
 
-# PS_TTL_MS from the user's zsh config (a plain assignment), else the hook default.
-ps_ttl_ms() {
+# ps_setting <NAME> <default>: a scalar PS_* setting from the user's zsh config
+# (last plain `NAME=value` assignment, quotes stripped), else the default.
+ps_setting() {
   local v=""
-  [ -r "$USER_CONFIG" ] && v=$(sed -n -E 's/^[[:space:]]*(typeset -gi |integer )?PS_TTL_MS=([0-9]+).*/\2/p' "$USER_CONFIG" | tail -n1)
-  printf '%s' "${v:-43200000}"
+  [ -r "$USER_CONFIG" ] && v=$(sed -n -E "s/^[[:space:]]*(typeset[[:space:]]+-[a-z]+[[:space:]]+|integer[[:space:]]+)?$1=['\"]?([^'\"#[:space:]]*).*/\\2/p" "$USER_CONFIG" | tail -n1)
+  printf '%s' "${v:-$2}"
 }
+ps_ttl_ms() { ps_setting PS_TTL_MS 43200000; }
 
 # state_get <file> <key>: first value for key in a key=value state file.
 state_get() {
@@ -69,6 +74,10 @@ ps_reconcile() {
     case $'\n'"$panes" in *$'\n'"$pane$SEP"*) ;; *) rm -f "$f" ;; esac
   done
 
+  # Sidebar off: nothing to report beyond clearing tokens a previous setting
+  # left behind, which the loop below does since every wanted value is empty.
+  local sidebar; sidebar=$(ps_setting PS_SIDEBAR off)
+
   local ws active cur_aws cur_prod cur_env p_pane p_tab p_ws p_focused
   local best best_rank best_time rank t want_aws want_prod want_env
   while IFS="$SEP" read -r ws active cur_aws cur_prod cur_env; do
@@ -92,9 +101,12 @@ $panes
 EOF
     want_aws="" want_prod="" want_env=""
     if [ -n "$best" ]; then
-      want_aws=$(state_get "$best" aws)
-      want_prod=$(state_get "$best" aws_prod)
-      want_env=$(state_get "$best" env)
+      case $sidebar in
+        all)  want_aws=$(state_get "$best" aws)
+              want_prod=$(state_get "$best" aws_prod)
+              want_env=$(state_get "$best" env) ;;
+        prod) want_prod=$(state_get "$best" aws_prod) ;;
+      esac
     fi
     [ "$want_aws|$want_prod|$want_env" = "$cur_aws|$cur_prod|$cur_env" ] && continue
     ps_report "$ws" "$want_aws" "$want_prod" "$want_env"
@@ -106,6 +118,52 @@ EOF
 ps_focused_pane() {
   if [ -n "${HERDR_PANE_ID:-}" ]; then printf '%s' "$HERDR_PANE_ID"; return; fi
   ps_snapshot | jq -r '.result.snapshot.focused_pane_id // empty' 2>/dev/null
+}
+
+# Toggle the project bar in the focused pane's tab. It is opened below the
+# tab's bottom-most full-width pane, so it spans the whole tab whenever the
+# layout has such a pane (one pane, or anything stacked above a full-width
+# one); otherwise it goes under the focused pane. Then the divider is moved
+# down until the bar is PS_BAR_ROWS rows of content plus its borders. herdr
+# keeps every split at 10% or more, so on short screens the bar can come out
+# a bit taller; the spare rows are used for wrapping env entries.
+ps_bar_toggle() {  # ps_bar_toggle [<pane>]: defaults to the focused pane
+  local snap focused tab reg pid layout rows anchor ah out amount
+  snap=$(ps_snapshot) || return 1
+  focused=${1:-$(printf '%s' "$snap" | jq -r '.result.snapshot.focused_pane_id // empty')}
+  [ -n "$focused" ] || return 1
+  tab=$(printf '%s' "$snap" | jq -r --arg p "$focused" '.result.snapshot.panes[] | select(.pane_id == $p) | .tab_id')
+  reg="$STATE_DIR/bars/$tab"
+
+  if [ -s "$reg" ]; then
+    pid=$(cat "$reg")
+    rm -f "$reg"
+    if printf '%s' "$snap" | jq -e --arg p "$pid" '.result.snapshot.panes | any(.pane_id == $p)' >/dev/null; then
+      "$HERDR" plugin pane close "$pid" >/dev/null 2>&1
+      return 0
+    fi
+  fi
+
+  rows=$(ps_setting PS_BAR_ROWS 3)
+  layout=$("$HERDR" pane layout --pane "$focused" 2>/dev/null) || return 1
+  anchor=$(printf '%s' "$layout" | jq -r --arg f "$focused" '
+    .result.layout as $l | $l.area as $a
+    | ([$l.panes[] | select(.rect.width == $a.width and .rect.y + .rect.height == $a.y + $a.height)][0]
+       // ($l.panes[] | select(.pane_id == $f)))
+    | "\(.pane_id) \(.rect.height)"')
+  ah=${anchor##* } anchor=${anchor% *}
+  [ -n "$anchor" ] || return 1
+
+  out=$("$HERDR" plugin pane open --plugin "$PLUGIN_ID" --entrypoint bar --placement split \
+    --direction down --target-pane "$anchor" --no-focus \
+    --env "PS_TAB_ID=$tab" --env "PS_TARGET_PANE=$focused" 2>/dev/null) || return 1
+  pid=$(printf '%s' "$out" | jq -r '.result.plugin_pane.pane.pane_id // empty')
+  [ -n "$pid" ] || return 1
+  mkdir -p "$STATE_DIR/bars" && printf '%s' "$pid" > "$reg"
+
+  # The split starts at 0.5 of the anchor's height; herdr clamps ratios to 0.9.
+  amount=$(awk -v r="$rows" -v ah="$ah" 'BEGIN { a = 0.5 - (r + 2) / ah; if (a < 0) a = 0; if (a > 0.4) a = 0.4; printf "%.4f", a }')
+  "$HERDR" pane resize --pane "$pid" --direction down --amount "$amount" >/dev/null 2>&1
 }
 
 ps_open() {  # ps_open <entrypoint>
@@ -167,7 +225,7 @@ info() { printf '  %s·%s %s\n' "$D" "$R" "$1"; }
 snippet() { printf '%s' "$D"; sed 's/^/      /' "$1"; printf '%s\n' "$R"; }
 
 ps_doctor_ui() {
-  local zshrc="${ZDOTDIR:-$HOME}/.zshrc" herdr_cfg starship_cfg n newest
+  local zshrc="${ZDOTDIR:-$HOME}/.zshrc" herdr_cfg starship_cfg n newest sidebar
   herdr_cfg="${HERDR_CONFIG_PATH:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr/config.toml}"
   starship_cfg="${STARSHIP_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/starship.toml}"
   printf '%s Project Status: doctor%s\n\n' "$B" "$R"
@@ -181,19 +239,28 @@ ps_doctor_ui() {
     bad "shell hook not sourced; add this to $zshrc (after the direnv hook):"
     printf '      %ssource %s/shell/hook.zsh%s\n' "$D" "$PS_ROOT" "$R"
   fi
-  n=$(ls "$STATE_DIR" 2>/dev/null | wc -l | tr -d ' ')
+  n=$(find "$STATE_DIR" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
   if [ "${n:-0}" -gt 0 ]; then
-    newest=$(ls -t "$STATE_DIR" | head -n1)
+    newest=$(ls -t "$STATE_DIR" | grep -v '^bars$' | head -n1)
     ok "hook active: $n pane(s) reporting, latest $newest"
   else
     bad "no pane has reported yet (open a new shell after sourcing the hook)"
   fi
 
-  if grep -qsE '"\$?(aws|aws_prod|env)"' "$herdr_cfg"; then
-    ok "sidebar rows reference the tokens ($herdr_cfg)"
+  if grep -qs 'project-status.bar' "$herdr_cfg"; then
+    ok "bar toggle bound ($herdr_cfg)"
   else
-    bad "sidebar rows missing; add to $herdr_cfg, then: herdr server reload-config"
+    bad "no key toggles the bar; add to $herdr_cfg, then: herdr server reload-config"
     snippet "$PS_ROOT/herdr.example.toml"
+  fi
+
+  sidebar=$(ps_setting PS_SIDEBAR off)
+  if [ "$sidebar" = off ]; then
+    info "sidebar tokens off (PS_SIDEBAR=prod|all in $USER_CONFIG to enable)"
+  elif grep -qsE '"\$(aws|aws_prod|env)"' "$herdr_cfg"; then
+    ok "sidebar tokens: $sidebar, rows reference them"
+  else
+    bad "PS_SIDEBAR=$sidebar but no sidebar rows use \$aws/\$aws_prod/\$env; see herdr.example.toml"
   fi
 
   if grep -qs 'PROJECT_STATUS_' "$starship_cfg"; then
@@ -210,10 +277,11 @@ ps_doctor_ui() {
 }
 
 case "${1:-}" in
+  bar)        ps_bar_toggle "${2:-}" ;;
   reconcile)  ps_reconcile ;;
   show)       ps_open details ;;
   doctor)     ps_open doctor ;;
   details-ui) ps_details_ui ;;
   doctor-ui)  ps_doctor_ui ;;
-  *) printf 'usage: %s reconcile|show|doctor|details-ui|doctor-ui\n' "${0##*/}" >&2; exit 2 ;;
+  *) printf 'usage: %s bar|reconcile|show|doctor|details-ui|doctor-ui\n' "${0##*/}" >&2; exit 2 ;;
 esac

@@ -21,6 +21,8 @@ zmodload zsh/datetime zsh/mapfile
 zmodload -F zsh/stat b:zstat
 zmodload -F zsh/files b:zf_mkdir b:zf_mv b:zf_rm
 
+typeset -g  _ps_hook_src=${${(%):-%x}:A} _ps_hook_mtime=""
+() { local -a m; zstat -A m +mtime -- $_ps_hook_src 2>/dev/null; _ps_hook_mtime=${m[1]} }
 typeset -g  _ps_herdr=${commands[herdr]:-}
 typeset -g  _ps_state_dir=${XDG_STATE_HOME:-$HOME/.local/state}/herdr-project-status
 typeset -g  _ps_cfg_key=""       # "<path>:<mtime>" of the parsed project.config
@@ -31,6 +33,7 @@ typeset -gi _ps_sso_at=0
 typeset -g  _ps_last_key=""
 typeset -gi _ps_last_sent=0
 typeset -g  _ps_aws_detail=""    # full "<profile> · expires <time>" for the details pane
+typeset -g  _ps_aws_profile="" _ps_aws_src="" _ps_aws_at=""   # raw values, so the bar can count down
 typeset -ga _ps_env_detail       # untruncated "label=value" entries
 
 # Defaults; override any of these in ~/.config/herdr-project-status/config.zsh
@@ -44,6 +47,7 @@ _ps_settings() {
   typeset -g  PS_PROD_EXCLUDE='*[Nn]o[Pp]rod*'
   typeset -g  PS_SEPARATOR='  '
   typeset -gi PS_PROMPT_IN_HERDR=0
+  typeset -g  PS_SIDEBAR=off        # herdr sidebar tokens: off | prod | all
   local f=${PS_USER_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr-project-status/config.zsh}
   [[ -r $f ]] && source $f
 }
@@ -201,9 +205,10 @@ _ps_sso_expiry() {
 
 # "<profile> · <time left>" in REPLY (empty when no profile is active).
 _ps_aws() {
-  REPLY="" _ps_aws_detail=""
+  REPLY="" _ps_aws_detail="" _ps_aws_profile="" _ps_aws_src="" _ps_aws_at=""
   local profile=${AWS_PROFILE:-${AWS_VAULT:-$AWS_DEFAULT_PROFILE}}
   [[ -n $profile ]] || return 0
+  _ps_aws_profile=$profile
   local exp=${AWS_CREDENTIAL_EXPIRATION:-$AWS_SESSION_EXPIRATION} at="" left="" src=""
   if [[ -n $exp ]] && _ps_epoch $exp; then
     at=$REPLY src=credentials
@@ -211,6 +216,7 @@ _ps_aws() {
     at=$REPLY src="sso session"
   fi
   if [[ -n $at ]]; then
+    _ps_aws_src=$src _ps_aws_at=$at
     _ps_left $(( at - EPOCHSECONDS )); left=$REPLY
     strftime -s REPLY '%Y-%m-%d %H:%M' $at
     if [[ $left == expired ]]; then
@@ -228,7 +234,8 @@ _ps_is_prod() {
   [[ $1 == ${~PS_PROD_PATTERN} && $1 != ${~PS_PROD_EXCLUDE} ]]
 }
 
-# Per-pane state for the plugin side (re-report on focus, details pane).
+# Per-pane state for the plugin side (project bar, details pane, sidebar
+# re-report on focus).
 # key=value lines, values are newline-free.
 _ps_write_state() {
   [[ -n $HERDR_PANE_ID ]] || return
@@ -240,15 +247,19 @@ _ps_write_state() {
     "cwd=$PWD"
     "config=$_ps_cfg_file"
     "aws=$1" "aws_prod=$2" "env=$3"
+    "aws_profile=$_ps_aws_profile" "aws_src=$_ps_aws_src" "aws_expires=$_ps_aws_at"
     "detail.aws=$_ps_aws_detail"
   )
   for e in $_ps_env_detail; do lines+=("detail.env=$e"); done
   print -rl -- $lines >| $f.tmp 2>/dev/null && zf_mv -f $f.tmp $f 2>/dev/null
 }
 
+# Sidebar tokens; PS_SIDEBAR decides which are shown, the rest are cleared.
 _ps_report() {
   local -a args
   local name val
+  [[ $PS_SIDEBAR == all ]] || set -- "" "$2" ""
+  [[ $PS_SIDEBAR == (all|prod) ]] || set -- "" "" ""
   for name val in aws "$1" aws_prod "$2" env "$3"; do
     if [[ -n $val ]]; then args+=(--token "$name=$val"); else args+=(--clear-token $name); fi
   done
@@ -257,13 +268,19 @@ _ps_report() {
 }
 
 _project_status_precmd() {
+  # Pick up an updated hook without `source ~/.zshrc` in every open shell.
+  local -a hm
+  zstat -A hm +mtime -- $_ps_hook_src 2>/dev/null
+  if [[ -n ${hm[1]} && ${hm[1]} != $_ps_hook_mtime ]]; then
+    source $_ps_hook_src && { _project_status_precmd; return }
+  fi
   _ps_find_config
   _ps_aws;  local aws=$REPLY aws_prod=""
   if [[ -n $aws ]] && _ps_is_prod ${aws%% · *}; then aws_prod=$aws aws=""; fi
   _ps_env;  local env=$REPLY
 
-  # starship segments ([env_var.PROJECT_STATUS_*]). Inside herdr the sidebar
-  # already shows them, so only the prod warning stays in the prompt by default.
+  # starship segments ([env_var.PROJECT_STATUS_*]). Inside herdr the project
+  # bar shows them, so only the prod warning stays in the prompt by default.
   local in_herdr=${HERDR_WORKSPACE_ID:+1}
   if [[ -n $aws_prod ]]; then export PROJECT_STATUS_AWS_PROD=$aws_prod; else unset PROJECT_STATUS_AWS_PROD; fi
   if [[ -z $in_herdr ]] || (( PS_PROMPT_IN_HERDR )); then
@@ -274,10 +291,14 @@ _project_status_precmd() {
   fi
 
   [[ -n $in_herdr && -n $_ps_herdr ]] || return 0
-  local key="$aws|$aws_prod|$env"
+  local key="$aws|$aws_prod|$env|$PWD|$_ps_cfg_file|$PS_SIDEBAR"
   [[ $key == $_ps_last_key ]] && (( EPOCHSECONDS - _ps_last_sent < PS_REFRESH_S )) && return 0
+  local was=$_ps_last_key
   _ps_last_key=$key _ps_last_sent=$EPOCHSECONDS
   _ps_write_state "$aws" "$aws_prod" "$env"
+  # With the sidebar off herdr is never called, except once to clear tokens a
+  # previous setting left behind.
+  [[ $PS_SIDEBAR == off && ( -z $was || $was == *\|off ) ]] && return 0
   _ps_report "$aws" "$aws_prod" "$env"
 }
 

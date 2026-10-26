@@ -135,7 +135,15 @@ _ps_herdr=$tmp/fake-herdr
 print -r -- '#!/bin/sh
 printf "%s\n" "$@" > "'$tmp'/herdr-args"' > $_ps_herdr; chmod +x $_ps_herdr
 export AWS_PROFILE=nomics_apios_dev
-_ps_last_key=""
+PS_SIDEBAR=off _ps_last_key=""
+_project_status_precmd
+sleep 0.3
+ok "sidebar off: herdr never called" "$([[ -e $tmp/herdr-args ]] && echo sent || echo none)" none
+ok "sidebar off: state still written" "$(command grep '^aws_profile=' $_ps_state_dir/w1:p1)" "aws_profile=nomics_apios_dev"
+ok "state has raw expiry for the bar" "$(command grep -c -E '^aws_expires=[0-9]+$' $_ps_state_dir/w1:p1)" 1
+ok "state has expiry source" "$(command grep '^aws_src=' $_ps_state_dir/w1:p1)" "aws_src=sso session"
+
+PS_SIDEBAR=all _ps_last_key=""
 _project_status_precmd
 sleep 0.3
 ok "state file aws" "$(command grep '^aws=' $_ps_state_dir/w1:p1)" "aws=nomics_apios_dev · 2h00m"
@@ -148,8 +156,39 @@ rm -f $tmp/herdr-args
 _project_status_precmd; sleep 0.2
 ok "unchanged status is not re-sent" "$([[ -e $tmp/herdr-args ]] && echo sent || echo skipped)" skipped
 
+PS_SIDEBAR=prod; AWS_PROFILE=nomics_apios_prod
+_project_status_precmd; sleep 0.3
+ok "sidebar prod: only the warning token" "$(tr '\n' ' ' < $tmp/herdr-args)" \
+   "workspace report-metadata w1 --source project-status --ttl-ms 43200000 --clear-token aws --token aws_prod=nomics_apios_prod --clear-token env "
+
+rm -f $tmp/herdr-args
+PS_SIDEBAR=off
+_project_status_precmd; sleep 0.3
+ok "switching to off clears tokens once" "$(tr '\n' ' ' < $tmp/herdr-args)" \
+   "workspace report-metadata w1 --source project-status --ttl-ms 43200000 --clear-token aws --clear-token aws_prod --clear-token env "
+rm -f $tmp/herdr-args; _ps_last_sent=0
+_project_status_precmd; sleep 0.2
+ok "off stays quiet afterwards" "$([[ -e $tmp/herdr-args ]] && echo sent || echo none)" none
+export AWS_PROFILE=nomics_apios_dev
+
 _project_status_exit
 ok "zshexit removes state" "$([[ -e $_ps_state_dir/w1:p1 ]] && echo present || echo gone)" gone
+
+# --- self-reload when the hook file changes ----------------------------------
+_ps_hook_mtime=0 _ps_last_key=stale
+_project_status_precmd
+ok "hook reloads itself when its file changed" "$_ps_hook_mtime" "$(zstat +mtime $root/shell/hook.zsh)"
+ok "reload ran the new precmd" "$([[ $_ps_last_key == stale ]] && echo stale || echo fresh)" fresh
+
+# --- bar: state written by the v0.1 hook -------------------------------------
+mkdir -p $XDG_STATE_HOME/herdr-project-status
+print -l "updated=$EPOCHSECONDS" "aws=" "aws_prod=te-gpt-prod · 3h" "env=" \
+  "detail.aws=te-gpt-prod · credentials: 3h00m left (until 2026-10-27 01:18)" \
+  > $XDG_STATE_HOME/herdr-project-status/old
+got=$(zsh -f -c "source <(sed '/^cleanup()/,\$d' $root/bar.zsh)
+  load_state old; print -r -- \${st[aws_profile]}/\${st[aws_src]}/\${st[aws_expires]}")
+strftime -r -s _exp '%Y-%m-%d %H:%M' '2026-10-27 01:18'
+ok "bar reads v0.1 state" "$got" "te-gpt-prod/credentials/$_exp"
 
 # --- prompt cost -------------------------------------------------------------
 cd $tmp/proj
