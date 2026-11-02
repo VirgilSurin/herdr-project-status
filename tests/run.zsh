@@ -177,7 +177,7 @@ ok "zshexit removes state" "$([[ -e $_ps_state_dir/w1:p1 ]] && echo present || e
 # --- self-reload when the hook file changes ----------------------------------
 _ps_hook_mtime=0 _ps_last_key=stale
 _project_status_precmd
-ok "hook reloads itself when its file changed" "$_ps_hook_mtime" "$(zstat +mtime $root/shell/hook.zsh)"
+ok "hook reloads itself when its file changed" "$_ps_hook_mtime" "$(zstat +mtime $root/shell/hook.zsh):$(zstat +mtime $root/shell/modeline.zsh)"
 ok "reload ran the new precmd" "$([[ $_ps_last_key == stale ]] && echo stale || echo fresh)" fresh
 
 # --- bar: state written by the v0.1 hook -------------------------------------
@@ -190,6 +190,125 @@ got=$(zsh -f -c "source <(sed '/^cleanup()/,\$d' $root/bar.zsh)
 strftime -r -s _exp '%Y-%m-%d %H:%M' '2026-10-27 01:18'
 ok "bar reads v0.1 state" "$got" "te-gpt-prod/credentials/$_exp"
 
+# --- project.config @options -------------------------------------------------
+for line want in "modeline = on" on "modeline on" on "modeline" on "Modeline=Off" off \
+                 "modeline = false" off "theme = dark" dark; do
+  _ps_opts=(); _ps_parse_option $line
+  ok "option [@$line]" "${_ps_opts[${${(L)line}%%[ =]*}]}" $want
+done
+mkdir -p $tmp/mlproj/src
+print -l '@modeline = on      # bottom row' '@unknown-thing yes' NODE_ENV token=API_TOKEN:set \
+  > $tmp/mlproj/project.config
+cd $tmp/mlproj/src; _ps_find_config
+ok "options don't become env entries" "${(j:,:)_ps_labels}" "NODE_ENV,token"
+ok "option parsed" "${_ps_opts[modeline]}:${_ps_opts[unknown-thing]}" "on:on"
+
+# --- @env background tint ----------------------------------------------------
+mkdir -p $tmp/envproj
+print -l '@env dev  = *noprod OR te_gpt_noprod, Blue' '@env test = *uat | *qa ,yellow' \
+  '@env prod = *prod, #3A0D0D   # dark red' '@env demo = *demo, none' '@env bad = *x, chartreuse' \
+  '@env worse = [abc], red' '@env nocolour = *y' NODE_ENV > $tmp/envproj/project.config
+cd $tmp/envproj; _ps_find_config
+ok "env rules parsed in order" "${(j:,:)_ps_env_names}" "dev,test,prod,demo"
+ok "env alternatives" "${_ps_env_pats[1]}|${_ps_env_pats[2]}" "(#i)(*noprod|te_gpt_noprod)|(#i)(*uat|*qa)"
+ok "env colours" "${(j:,:)_ps_env_tints}" "#142540,#34300f,#3a0d0d,none"
+ok "env rules are not options or entries" "${(k)_ps_opts}:${(j:,:)_ps_labels}" ":NODE_ENV"
+typeset -g emitted=""
+_ps_ml_emit() { emitted+=$1 }
+for prof want in te-gpt-noprod dev/#142540 TE_GPT_NOPROD dev/#142540 te-gpt-prod prod/#3a0d0d \
+                 verbolia_qa test/#34300f nomics_apios_demo demo/ necko_internship /; do
+  _ps_aws_profile=$prof; _ps_detect_env
+  ok "env for $prof" "$_ps_env_name/$_ps_env_tint" $want
+done
+unset AWS_SESSION_EXPIRATION AWS_CREDENTIAL_EXPIRATION
+tint_dev=$'\e]11;#142540\e\\' tint_prod=$'\e]11;#3a0d0d\e\\' tint_reset=$'\e]111\e\\'
+export AWS_PROFILE=te-gpt-noprod; _ps_tint_cur="" emitted=""; _project_status_precmd
+ok "tint set on match" "${(q)emitted}" "${(q)tint_dev}"
+emitted=""; _project_status_precmd
+ok "tint re-sent while wanted" "${(q)emitted}" "${(q)tint_dev}"
+export AWS_PROFILE=te-gpt-prod; emitted=""; _project_status_precmd
+ok "tint follows the profile" "${(q)emitted}" "${(q)tint_prod}"
+unset AWS_PROFILE; emitted=""; _project_status_precmd
+ok "reset when the profile goes" "${(q)emitted}" "${(q)tint_reset}"
+emitted=""; _project_status_precmd
+ok "reset sent only once" "$emitted" ""
+export AWS_PROFILE=te-gpt-prod; _project_status_precmd; cd $tmp; emitted=""; _project_status_precmd
+ok "reset when leaving the project" "${(q)emitted}" "${(q)tint_reset}"
+cd $tmp/envproj; _project_status_precmd; emitted=""; _project_status_exit
+ok "reset on exit" "${(q)emitted}" "${(q)tint_reset}"
+unset AWS_PROFILE; _ps_tint_cur=""; cd $tmp/mlproj/src; _ps_find_config
+
+# --- modeline ----------------------------------------------------------------
+typeset -g emitted=""
+_ps_ml_emit() { emitted+=$1 }
+plain() { setopt localoptions extendedglob; REPLY=${1//$'\e'\[[0-9;]#[A-Za-z]/} }
+LINES=30 COLUMNS=100 PS_MODELINE=off
+NODE_ENV=production API_TOKEN=x
+export AWS_PROFILE=nomics_apios_dev
+strftime -s exp '%Y-%m-%dT%H:%M:%S' $(( EPOCHSECONDS + 2520 + 30 ))
+export AWS_SESSION_EXPIRATION="${exp}$(strftime %z $EPOCHSECONDS | sed -E 's/(..)$/:\1/')"
+_ps_ml_on=0 emitted=""
+_project_status_precmd
+plain $_ps_ml_line
+ok "modeline row" "$REPLY" " mlproj │ AWS nomics_apios_dev 42m │ NODE_ENV production · token ✓"
+ok "modeline on from project.config" $_ps_ml_on 1
+ok "first prompt frees the last row and reserves it" "$emitted" $'\e7\e[r\e8\eD\e[A\e7\e[1;29r\e8'
+ok "starship env segments off while the modeline shows" "${PROJECT_STATUS_ENV:-unset}" unset
+ok "palette background" "${_ps_ml_line[1,14]}" $'\e[0;48;5;0;39m'
+emitted=""; _ps_ml_line_init
+ok "line-init draws on the last row" "${emitted[1,9]}" $'\e7\e[30;1H'
+ok "one idle tick scheduled" "${#${(@M)zsh_scheduled_events:#*:_ps_ml_tick}}" 1
+_project_status_precmd
+ok "no duplicate tick" "${#${(@M)zsh_scheduled_events:#*:_ps_ml_tick}}" 1
+
+PS_MODELINE_BG=none PS_MODELINE_FG='#cdd6f4'; _ps_ml_render
+ok "bg none, hex fg" "${_ps_ml_line[1,24]}" $'\e[0;49;38;2;205;214;244m'
+PS_MODELINE_BG=0 PS_MODELINE_FG=default
+
+COLUMNS=40; _ps_ml_render; plain $_ps_ml_line
+ok "narrow: whole env entries dropped" "$REPLY" " mlproj │ AWS nomics_apios_dev 42m │ …"
+COLUMNS=20; _ps_ml_render; plain $_ps_ml_line
+ok "very narrow: cut" "$REPLY" " mlproj │ AWS nomi…"
+COLUMNS=100
+
+AWS_PROFILE=te-gpt-prod; _ps_aws; _ps_ml_render; plain $_ps_ml_line
+ok "prod badge" "$REPLY" " mlproj │  ⚠ PROD  te-gpt-prod 42m │ NODE_ENV production · token ✓"
+export AWS_SESSION_EXPIRATION=2020-01-01T00:00:00Z AWS_PROFILE=nomics_apios_dev; _ps_aws; _ps_ml_render; plain $_ps_ml_line
+ok "expired" "$REPLY" " mlproj │ AWS nomics_apios_dev expired │ NODE_ENV production · token ✓"
+unset AWS_PROFILE AWS_SESSION_EXPIRATION; _ps_aws; _ps_ml_render; plain $_ps_ml_line
+ok "no profile: no aws section" "$REPLY" " mlproj │ NODE_ENV production · token ✓"
+
+for cmd want in claude 0 "npx claude" 0 "FOO=1 fzf --height 40%" 0 "sudo -E htop" 0 \
+                "git log | less" 0 "/opt/homebrew/bin/claude -c" 0 \
+                ls 1 nvim 1 "echo claude" 1 "make && npm test" 1; do
+  _ps_ml_yields $cmd; ok "yield [$cmd]" $? $want
+done
+emitted=""; _ps_ml_preexec "" "" "claude"
+ok "yield releases the row" "$emitted:$_ps_ml_on" $'\e7\e[30;1H\e[0m\e[2K\e[r\e8:0'
+_project_status_precmd
+ok "next prompt takes the row back" $_ps_ml_on 1
+emitted=""; _ps_ml_preexec "" "" "ls"
+ok "plain commands keep the row" "$emitted:$_ps_ml_on" ":1"
+PS_MODELINE_KEEP=0; _ps_ml_preexec "" "" "ls"
+ok "PS_MODELINE_KEEP=0 releases for every command" $_ps_ml_on 0
+PS_MODELINE_KEEP=1; _project_status_precmd
+
+LINES=20; emitted=""; _project_status_precmd
+ok "resize re-reserves with the new height" "${(M)emitted:#*$'\e[1;19r'*}" "$emitted"
+LINES=3; _project_status_precmd
+ok "tiny terminal: no modeline" $_ps_ml_on 0
+LINES=30; _project_status_precmd
+
+cd $tmp; emitted=""; _project_status_precmd
+ok "leaving the project releases the row" "$_ps_ml_on:${(M)emitted:#*$'\e[r'*}" "0:$emitted"
+PS_MODELINE=on; _project_status_precmd; plain $_ps_ml_line
+ok "PS_MODELINE=on outside projects" "$_ps_ml_on:$REPLY" "1: ${tmp:t}"
+cd $tmp/mlproj; print '@modeline off' > $tmp/mlproj/project.config; _ps_cfg_key=""; _project_status_precmd
+ok "@modeline off beats PS_MODELINE=on" $_ps_ml_on 0
+PS_MODELINE=off
+_project_status_exit
+unfunction _ps_ml_emit plain
+
 # --- prompt cost -------------------------------------------------------------
 cd $tmp/proj
 _ps_last_sent=$EPOCHSECONDS
@@ -198,6 +317,17 @@ repeat 200 _project_status_precmd
 float per_ms=$(( (EPOCHREALTIME - t0) * 1000 / 200 ))
 printf 'precmd: %.3f ms/prompt\n' $per_ms
 ok "precmd under 2ms" $(( per_ms < 2 )) 1
+
+print -l '@modeline' NODE_ENV token=API_TOKEN:set > $tmp/mlproj/project.config
+cd $tmp/mlproj; _ps_cfg_key=""
+_ps_ml_emit() { : }
+LINES=30 COLUMNS=120
+t0=$EPOCHREALTIME
+repeat 200 { _project_status_precmd; _ps_ml_line_init }
+per_ms=$(( (EPOCHREALTIME - t0) * 1000 / 200 ))
+printf 'precmd + modeline: %.3f ms/prompt\n' $per_ms
+ok "modeline on" $_ps_ml_on 1
+ok "precmd + modeline under 2ms" $(( per_ms < 2 )) 1
 
 print "$pass passed, $fail failed"
 (( fail == 0 ))

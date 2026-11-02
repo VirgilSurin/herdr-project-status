@@ -185,7 +185,7 @@ wait_key() {
 }
 
 ps_details_ui() {
-  local f="$STATE_DIR/${PS_TARGET_PANE:-}" line aws_line cfg
+  local f="$STATE_DIR/${PS_TARGET_PANE:-}" line aws_line aws_env cfg
   printf '%s Project Status%s\n\n' "$B" "$R"
   if [ -z "${PS_TARGET_PANE:-}" ] || [ ! -f "$f" ]; then
     printf '  %sNo status reported for this pane yet.%s\n' "$YEL" "$R"
@@ -204,6 +204,8 @@ ps_details_ui() {
   else
     printf '  %sAWS%s        %sno profile active%s\n' "$B" "$R" "$D" "$R"
   fi
+  aws_env=$(state_get "$f" aws_env)
+  [ -n "$aws_env" ] && printf '  %senv%s        %s\n' "$B" "$R" "$aws_env"
 
   printf '\n  %sENV%s\n' "$B" "$R"
   local any=0
@@ -261,6 +263,12 @@ ps_doctor_ui() {
     ok "sidebar tokens: $sidebar, rows reference them"
   else
     bad "PS_SIDEBAR=$sidebar but no sidebar rows use \$aws/\$aws_prod/\$env; see herdr.example.toml"
+  fi
+
+  if [ "$(ps_setting PS_MODELINE off)" = on ]; then
+    ok "modeline on everywhere (PS_MODELINE=on); \`@modeline off\` in a project.config turns it off there"
+  else
+    info "modeline off by default; turn it on per project with \`@modeline = on\` in project.config"
   fi
 
   if grep -qs 'PROJECT_STATUS_' "$starship_cfg"; then

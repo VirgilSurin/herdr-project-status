@@ -1,5 +1,14 @@
 # project.config — put at the repo root. One env var per line, `#` comments.
+# Lines starting with @ are options.
+@modeline = on          # draw the status on the terminal's last row
 NODE_ENV                # shows NODE_ENV=<value>
 stage=APP_STAGE         # shows stage=<value of APP_STAGE>
 DATABASE_URL:set        # shows only ✓ / ✗, never the value
 KUBECONFIG
+
+# Tint the pane background while the AWS profile matches. First match wins, so
+# put the narrower patterns first; `OR` or `|` between globs, case-insensitive.
+# Colours: blue green yellow orange red purple cyan gray, #rrggbb, or none.
+@env dev  = *noprod OR *dev, blue
+@env test = *uat | *qa, yellow
+@env prod = *prod, red
